@@ -1,6 +1,7 @@
 use super::*;
 use crate::alloc::TursoIteratorExt;
 use crate::function::AggFunc;
+use crate::translate::{optimizer::order::distinct_is_ordered, plan::DistinctMode};
 
 pub fn init_distinct(
     program: &mut ProgramBuilder,
@@ -19,9 +20,18 @@ pub fn init_distinct(
             .map(|c| c.unwrap_or(CollationSeq::Binary))
         })
         .collect::<Result<Vec<_>>>()?;
-    let hash_table_id = program.alloc_hash_table_id();
+    let mode = if distinct_is_ordered(plan, &collations, resolver.schema()) {
+        DistinctMode::Ordered {
+            previous_reg: program.alloc_registers(plan.result_columns.len()),
+            seen_reg: program.alloc_register(),
+        }
+    } else {
+        DistinctMode::Hash {
+            hash_table_id: program.alloc_hash_table_id(),
+        }
+    };
     let ctx = DistinctCtx {
-        hash_table_id,
+        mode,
         collations,
         label_on_conflict: program.allocate_label(),
     };
@@ -95,7 +105,7 @@ impl InitLoop {
             let hash_table_id = program.alloc_hash_table_id();
             agg.distinctness = Distinctness::Distinct {
                 ctx: Some(DistinctCtx {
-                    hash_table_id,
+                    mode: DistinctMode::Hash { hash_table_id },
                     collations,
                     label_on_conflict: program.allocate_label(),
                 }),

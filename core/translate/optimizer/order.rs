@@ -1,4 +1,4 @@
-use crate::schema::{impl_effective_nulls_order, Table};
+use crate::schema::{impl_effective_nulls_order, GeneratedType, Table};
 use crate::turso_assert_greater_than_or_equal;
 use crate::{
     schema::{FromClauseSubquery, Index, Schema},
@@ -10,8 +10,8 @@ use crate::{
             usable_constraints_for_lhs_mask, RangeConstraintRef, TableConstraints,
         },
         plan::{
-            GroupBy, HashJoinType, IterationDirection, JoinedTable, Operation, Plan, Scan,
-            SimpleAggregate, TableReferences,
+            GroupBy, HashJoinType, IterationDirection, JoinedTable, Operation, Plan, Scan, Search,
+            SelectPlan, SimpleAggregate, TableReferences,
         },
         planner::{table_mask_from_expr, TableMask},
     },
@@ -849,6 +849,102 @@ impl OrderConsumption {
         consumed: 0,
         includes_rowid: false,
     };
+}
+
+pub(crate) fn distinct_is_ordered(
+    plan: &SelectPlan,
+    collations: &[CollationSeq],
+    schema: &Schema,
+) -> bool {
+    if plan.joined_tables().len() != 1
+        || plan.join_order.len() != 1
+        || plan.group_by.is_some()
+        || !plan.aggregates.is_empty()
+        || plan.window.is_some()
+        || !plan.values.is_empty()
+        || plan.result_columns.is_empty()
+    {
+        return false;
+    }
+    let table = &plan.joined_tables()[plan.join_order[0].original_idx];
+    if !matches!(table.table, Table::BTree(_)) {
+        return false;
+    }
+    let (index, iter_dir) = match &table.op {
+        Operation::Scan(Scan::BTreeTable { index, iter_dir }) => (index.as_deref(), *iter_dir),
+        Operation::Search(Search::Seek { index, seek_def }) => {
+            (index.as_deref(), seek_def.iter_dir)
+        }
+        _ => return false,
+    };
+    if index.is_some_and(|index| {
+        index.ephemeral
+            || index.index_method.is_some()
+            || index.columns.iter().any(|column| column.expr.is_some())
+    }) {
+        return false;
+    }
+    let mut columns = Vec::with_capacity(plan.result_columns.len());
+    for (i, result) in plan.result_columns.iter().enumerate() {
+        let expr = match &result.expr {
+            ast::Expr::Collate(expr, _) => expr.as_ref(),
+            expr => expr,
+        };
+        let target = match expr {
+            ast::Expr::Column {
+                table: table_id,
+                column,
+                ..
+            } if *table_id == table.internal_id => {
+                let column_def = &table.columns()[*column];
+                if !matches!(column_def.generated_type(), GeneratedType::NotGenerated)
+                    || column_def.is_array()
+                {
+                    return false;
+                }
+                ColumnTarget::Column(*column)
+            }
+            ast::Expr::RowId {
+                table: table_id, ..
+            } if *table_id == table.internal_id => ColumnTarget::RowId,
+            _ => return false,
+        };
+        if collations[i].is_custom() {
+            return false;
+        }
+        let index_column = index.and_then(|index| index.columns.get(i));
+        let order = index_column.map_or(SortOrder::Asc, |column| column.order);
+        let order = match iter_dir {
+            IterationDirection::Forwards => order,
+            IterationDirection::Backwards => match order {
+                SortOrder::Asc => SortOrder::Desc,
+                SortOrder::Desc => SortOrder::Asc,
+            },
+        };
+        columns.push(ColumnOrder {
+            table_id: table.internal_id,
+            target,
+            order,
+            collation: collations[i],
+            nulls_order: index_column
+                .map(|column| column.effective_nulls_order_when_iterated(iter_dir)),
+        });
+    }
+    btree_access_order_consumed(
+        table,
+        iter_dir,
+        index,
+        &[],
+        &OrderTarget {
+            columns,
+            purpose: OrderTargetPurpose::EliminatesSort(EliminatesSortBy::Group),
+        },
+        0,
+        schema,
+        EqualityPrefixScope::ConstantEquality,
+    )
+    .consumed
+        == plan.result_columns.len()
 }
 
 /// Return how many leading `order_target` columns this single-table btree

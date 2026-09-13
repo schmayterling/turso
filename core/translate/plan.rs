@@ -18,7 +18,7 @@ use crate::{
     vdbe::{
         affinity::{self, Affinity},
         builder::{CursorKey, CursorType, ProgramBuilder},
-        insn::{HashDistinctData, Insn},
+        insn::{CmpInsFlags, HashDistinctData, Insn},
         BranchOffset, CursorID,
     },
     Result, VirtualTable, MAIN_DB_ID,
@@ -695,8 +695,7 @@ impl Distinctness {
 /// Translation context for handling DISTINCT columns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DistinctCtx {
-    /// Hash table id used to deduplicate results.
-    pub hash_table_id: usize,
+    pub mode: DistinctMode,
     /// Collations for each distinct key column.
     pub collations: Vec<CollationSeq>,
     /// The label for the on conflict branch.
@@ -711,16 +710,72 @@ impl DistinctCtx {
         num_regs: usize,
         start_reg: usize,
     ) {
-        program.emit_insn(Insn::HashDistinct {
-            data: Box::new(HashDistinctData {
-                hash_table_id: self.hash_table_id,
-                key_start_reg: start_reg,
-                num_keys: num_regs,
-                collations: self.collations.clone(),
-                target_pc: self.label_on_conflict,
-            }),
-        });
+        match self.mode {
+            DistinctMode::Hash { hash_table_id } => {
+                program.emit_insn(Insn::HashDistinct {
+                    data: Box::new(HashDistinctData {
+                        hash_table_id,
+                        key_start_reg: start_reg,
+                        num_keys: num_regs,
+                        collations: self.collations.clone(),
+                        target_pc: self.label_on_conflict,
+                    }),
+                });
+            }
+            DistinctMode::Ordered {
+                previous_reg,
+                seen_reg,
+            } => {
+                let different = program.allocate_label();
+                program.emit_insn(Insn::IfNot {
+                    reg: seen_reg,
+                    target_pc: different,
+                    jump_if_null: false,
+                });
+                for (i, collation) in self.collations.iter().enumerate() {
+                    program.emit_insn(Insn::Ne {
+                        lhs: start_reg + i,
+                        rhs: previous_reg + i,
+                        target_pc: different,
+                        flags: CmpInsFlags::default()
+                            .null_eq()
+                            .with_affinity(Affinity::Blob),
+                        collation: Some(*collation),
+                    });
+                }
+                program.emit_insn(Insn::Goto {
+                    target_pc: self.label_on_conflict,
+                });
+                program.preassign_label_to_next_insn(different);
+                program.emit_insn(Insn::Copy {
+                    src_reg: start_reg,
+                    dst_reg: previous_reg,
+                    extra_amount: num_regs - 1,
+                });
+                program.emit_int(1, seen_reg);
+            }
+        }
     }
+
+    pub fn emit_reset(&self, program: &mut ProgramBuilder) {
+        match self.mode {
+            DistinctMode::Hash { hash_table_id } => {
+                program.emit_insn(Insn::HashClear { hash_table_id });
+            }
+            DistinctMode::Ordered { seen_reg, .. } => program.emit_int(0, seen_reg),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DistinctMode {
+    Hash {
+        hash_table_id: usize,
+    },
+    Ordered {
+        previous_reg: usize,
+        seen_reg: usize,
+    },
 }
 
 /// Detected simple-aggregate optimization.

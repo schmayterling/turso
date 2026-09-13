@@ -14,9 +14,9 @@ use crate::{
         main_loop::{init_distinct, CloseLoop, InitLoop, LoopBodyEmitter, OpenLoop},
         order_by::EmitOrderBy,
         plan::{
-            BitSet, Distinctness, EphemeralRowidMode, EvalAt, IndexMethodQuery, JoinOrderMember,
-            Operation, QueryDestination, Scan, Search, SeekKeyComponent, SelectPlan,
-            SimpleAggregate,
+            BitSet, DistinctMode, Distinctness, EphemeralRowidMode, EvalAt, IndexMethodQuery,
+            JoinOrderMember, Operation, QueryDestination, Scan, Search, SeekKeyComponent,
+            SelectPlan, SimpleAggregate,
         },
         planner::table_mask_from_expr,
         select::emit_simple_count,
@@ -200,10 +200,10 @@ pub fn emit_query<'a>(
         *ctx = distinct_ctx
     }
     if let Distinctness::Distinct { ctx: Some(ctx) } = &plan.distinctness {
-        program.emit_insn(Insn::HashClear {
-            hash_table_id: ctx.hash_table_id,
-        });
-        emit_explain!(program, false, crate::translate::eqp::EqpDetail::Distinct);
+        ctx.emit_reset(program);
+        if matches!(ctx.mode, DistinctMode::Hash { .. }) {
+            emit_explain!(program, false, crate::translate::eqp::EqpDetail::Distinct);
+        }
     }
 
     init_limit(program, t_ctx, &plan.limit, &plan.offset)?;

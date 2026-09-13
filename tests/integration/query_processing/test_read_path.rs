@@ -3,6 +3,123 @@ use rusqlite::Connection as SqliteConnection;
 use tempfile::TempDir;
 use turso_core::{LimboError, Numeric, StepResult, Value};
 
+#[turso_macros::test(mvcc)]
+fn ordered_distinct_uses_previous_row(tmp_db: TempDatabase) -> anyhow::Result<()> {
+    let conn = tmp_db.connect_limbo();
+    limbo_exec_rows(&conn, "CREATE TABLE t(a,b)");
+    limbo_exec_rows(&conn, "CREATE INDEX idx ON t(a)");
+    let rows = limbo_exec_rows(&conn, "EXPLAIN SELECT DISTINCT a FROM t");
+    let opcodes = rows
+        .iter()
+        .map(|row| match &row[1] {
+            rusqlite::types::Value::Text(opcode) => opcode.as_str(),
+            other => panic!("expected opcode, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(!opcodes.contains(&"HashDistinct"), "{opcodes:?}");
+    assert!(!opcodes.contains(&"HashClear"), "{opcodes:?}");
+    assert!(
+        opcodes.contains(&"Ne") && opcodes.contains(&"Copy"),
+        "{opcodes:?}"
+    );
+    Ok(())
+}
+
+#[turso_macros::test(mvcc)]
+fn ordered_distinct_access_paths(tmp_db: TempDatabase) -> anyhow::Result<()> {
+    let conn = tmp_db.connect_limbo();
+    limbo_exec_rows(&conn, "CREATE TABLE t(a INTEGER,b)");
+    limbo_exec_rows(&conn, "CREATE INDEX idx ON t(a ASC,b DESC)");
+    limbo_exec_rows(&conn, "CREATE TABLE words(s TEXT COLLATE NOCASE)");
+    limbo_exec_rows(&conn, "CREATE INDEX words_idx ON words(s)");
+    for (query, ordered) in [
+        ("SELECT DISTINCT a,b FROM t INDEXED BY idx", true),
+        (
+            "SELECT DISTINCT a,b FROM t INDEXED BY idx ORDER BY a DESC,b ASC",
+            true,
+        ),
+        (
+            "SELECT DISTINCT a,b FROM t INDEXED BY idx WHERE a >= 1 AND a < 3",
+            true,
+        ),
+        (
+            "SELECT DISTINCT a,b FROM t INDEXED BY idx ORDER BY b,a DESC",
+            true,
+        ),
+        (
+            "SELECT DISTINCT a,b FROM t INDEXED BY idx LIMIT 2 OFFSET 1",
+            true,
+        ),
+        ("SELECT DISTINCT rowid FROM t NOT INDEXED", true),
+        (
+            "SELECT DISTINCT s COLLATE NOCASE FROM words INDEXED BY words_idx",
+            true,
+        ),
+        (
+            "SELECT DISTINCT s COLLATE BINARY FROM words INDEXED BY words_idx",
+            false,
+        ),
+        ("SELECT DISTINCT a FROM t NOT INDEXED", false),
+        ("SELECT DISTINCT b FROM t INDEXED BY idx", false),
+        ("SELECT DISTINCT b,a FROM t INDEXED BY idx", false),
+        ("SELECT DISTINCT b FROM t INDEXED BY idx WHERE a=1", false),
+        ("SELECT DISTINCT +a FROM t INDEXED BY idx", false),
+        ("SELECT DISTINCT a FROM t WHERE a IN (1,2)", false),
+        ("SELECT DISTINCT a FROM t GROUP BY a", false),
+        ("SELECT count(DISTINCT a) FROM t", false),
+        (
+            "SELECT DISTINCT a,row_number() OVER () FROM t INDEXED BY idx",
+            false,
+        ),
+        (
+            "SELECT DISTINCT t.a FROM t JOIN words ON t.b=words.s",
+            false,
+        ),
+    ] {
+        let rows = limbo_exec_rows(&conn, &format!("EXPLAIN {query}"));
+        let opcodes = rows
+            .iter()
+            .map(|row| match &row[1] {
+                rusqlite::types::Value::Text(opcode) => opcode.as_str(),
+                other => panic!("expected opcode, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            !opcodes.contains(&"HashDistinct"),
+            ordered,
+            "{query}: {opcodes:?}"
+        );
+        if ordered {
+            assert!(!opcodes.contains(&"HashClear"), "{query}: {opcodes:?}");
+            assert!(
+                opcodes.contains(&"Ne") && opcodes.contains(&"Copy"),
+                "{query}: {opcodes:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[turso_macros::test(mvcc)]
+fn ordered_distinct_statement_reset(tmp_db: TempDatabase) -> anyhow::Result<()> {
+    let conn = tmp_db.connect_limbo();
+    limbo_exec_rows(&conn, "CREATE TABLE t(a)");
+    limbo_exec_rows(&conn, "CREATE INDEX idx ON t(a)");
+    limbo_exec_rows(&conn, "INSERT INTO t VALUES (1),(1)");
+    let mut stmt = conn.prepare("SELECT DISTINCT a FROM t INDEXED BY idx WHERE a=1")?;
+    for _ in 0..2 {
+        let mut count = 0;
+        stmt.run_with_row_callback(|row| {
+            assert_eq!(*row.get::<&Value>(0).unwrap(), Value::from_i64(1));
+            count += 1;
+            Ok(())
+        })?;
+        assert_eq!(count, 1);
+        stmt.reset()?;
+    }
+    Ok(())
+}
+
 #[turso_macros::test(mvcc, init_sql = "create table test (i integer);")]
 fn test_statement_reset_bind(tmp_db: TempDatabase) -> anyhow::Result<()> {
     let conn = tmp_db.connect_limbo();

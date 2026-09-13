@@ -1,5 +1,177 @@
 @database :memory:
 
+setup distinct_ordered {
+    CREATE TABLE t(a,b);
+    CREATE INDEX idx ON t(a ASC,b DESC);
+    INSERT INTO t VALUES (NULL,NULL),(NULL,NULL),(NULL,'z'),(NULL,'z'),
+        (1,'a'),(1,'a'),(1,'b'),(2,'a'),(2,'a'),(3,NULL);
+}
+
+@setup distinct_ordered
+test distinct-ordered-null {
+    SELECT quote(a) FROM (SELECT DISTINCT a FROM t INDEXED BY idx);
+}
+expect {
+    NULL
+    1
+    2
+    3
+}
+
+test distinct-ordered-storage-classes {
+    CREATE TABLE t(a);
+    CREATE INDEX idx ON t(a);
+    INSERT INTO t VALUES (NULL),(NULL),(1),(1.0),('1'),('1'),(X'31'),(X'31');
+    SELECT typeof(a),quote(a) FROM (SELECT DISTINCT a FROM t INDEXED BY idx);
+}
+expect {
+    null|NULL
+    integer|1
+    text|'1'
+    blob|X'31'
+}
+
+@setup distinct_ordered
+test distinct-ordered-composite {
+    SELECT quote(a),quote(b) FROM (
+        SELECT DISTINCT a,b FROM t INDEXED BY idx ORDER BY a ASC,b DESC
+    );
+}
+expect {
+    NULL|'z'
+    NULL|NULL
+    1|'b'
+    1|'a'
+    2|'a'
+    3|NULL
+}
+
+@setup distinct_ordered
+test distinct-ordered-reverse {
+    SELECT quote(a),quote(b) FROM (
+        SELECT DISTINCT a,b FROM t INDEXED BY idx ORDER BY a DESC,b ASC
+    );
+}
+expect {
+    3|NULL
+    2|'a'
+    1|'a'
+    1|'b'
+    NULL|NULL
+    NULL|'z'
+}
+
+@setup distinct_ordered
+test distinct-ordered-range {
+    SELECT DISTINCT a,b FROM t INDEXED BY idx WHERE a >= 1 AND a < 3;
+}
+expect {
+    1|b
+    1|a
+    2|a
+}
+
+@setup distinct_ordered
+test distinct-ordered-all-null {
+    SELECT quote(a),quote(b) FROM (
+        SELECT DISTINCT a,b FROM t INDEXED BY idx WHERE b IS NULL
+    );
+}
+expect {
+    NULL|NULL
+    3|NULL
+}
+
+@setup distinct_ordered
+test distinct-ordered-limit-offset {
+    SELECT quote(a),quote(b) FROM (
+        SELECT DISTINCT a,b FROM t INDEXED BY idx LIMIT 2 OFFSET 1
+    );
+}
+expect {
+    NULL|NULL
+    1|'b'
+}
+
+test distinct-ordered-collation {
+    CREATE TABLE t(a TEXT COLLATE NOCASE);
+    CREATE INDEX idx ON t(a);
+    INSERT INTO t VALUES ('a'),('A'),('b'),('B'),('a');
+    SELECT DISTINCT a FROM t INDEXED BY idx;
+    SELECT DISTINCT a COLLATE NOCASE FROM t INDEXED BY idx;
+    SELECT DISTINCT a COLLATE BINARY FROM t INDEXED BY idx ORDER BY 1;
+}
+expect {
+    a
+    b
+    a
+    b
+    A
+    B
+    a
+    b
+}
+
+@setup distinct_ordered
+test distinct-ordered-sorter {
+    SELECT quote(a),quote(b) FROM (
+        SELECT DISTINCT a,b FROM t INDEXED BY idx ORDER BY b ASC,a DESC
+    );
+}
+expect {
+    3|NULL
+    NULL|NULL
+    2|'a'
+    1|'a'
+    1|'b'
+    NULL|'z'
+}
+
+@setup distinct_ordered
+test distinct-ordered-correlated {
+    CREATE TABLE driver(n,x);
+    INSERT INTO driver VALUES (1,1),(2,1),(3,2),(4,2),(5,1);
+    SELECT n,(SELECT DISTINCT a FROM t INDEXED BY idx WHERE a >= x LIMIT 1)
+        FROM driver ORDER BY n;
+}
+expect {
+    1|1
+    2|1
+    3|2
+    4|2
+    5|1
+}
+
+@setup distinct_ordered
+test distinct-ordered-fallback {
+    SELECT DISTINCT b FROM t INDEXED BY idx WHERE a=1 ORDER BY b;
+    SELECT DISTINCT b FROM t INDEXED BY idx WHERE a IN (1,2) ORDER BY b;
+    SELECT quote(b) FROM (SELECT DISTINCT b FROM t INDEXED BY idx ORDER BY b);
+    SELECT DISTINCT t.b FROM t JOIN (SELECT 1 AS x UNION ALL SELECT 2) u ON t.a=u.x ORDER BY t.b;
+}
+expect {
+    a
+    b
+    a
+    b
+    NULL
+    'a'
+    'b'
+    'z'
+    a
+    b
+}
+
+@backend rust
+test distinct-ordered-plan {
+    CREATE TABLE t(a,b);
+    CREATE INDEX idx ON t(a);
+    EXPLAIN QUERY PLAN SELECT DISTINCT a FROM t;
+}
+expect pattern {
+    ^\d+\|\d+\|\d+\|SCAN t USING COVERING INDEX idx$
+}
+
 @cross-check-integrity
 test distinct-select-null {
     CREATE TABLE distinct_test (x);
