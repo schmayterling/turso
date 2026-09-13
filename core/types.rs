@@ -3548,6 +3548,8 @@ impl<'a, I: ?Sized + IO> Future for IOCompletionAsync<'a, I> {
 impl IOCompletions {
     /// Wais for the Completions to complete
     pub fn wait<I: ?Sized + IO>(self, io: &I) -> Result<()> {
+        self.0.wait_for_io();
+        self.0.step_io();
         io.wait_for_completion(self.0)
     }
 

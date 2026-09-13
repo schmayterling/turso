@@ -50,6 +50,44 @@ fn snapshot_directory(path: &std::path::Path) -> DirectorySnapshot {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn test_completion_owner_wakes_memory_main_temp_and_persistent_attach() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attached.db");
+        let db = Builder::new_local(":memory:")
+            .experimental_attach(true)
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch("CREATE TABLE t(x); BEGIN IMMEDIATE; INSERT INTO t VALUES(1); COMMIT;")
+            .await
+            .unwrap();
+        conn.execute(&format!("ATTACH '{}' AS aux", path.display()), ())
+            .await
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE aux.saved(x); INSERT INTO aux.saved VALUES(7); DETACH aux;",
+        )
+        .await
+        .unwrap();
+        let reopened = Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = reopened.connect().unwrap();
+        let mut rows = conn.query("SELECT x FROM saved", ()).await.unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            7
+        );
+        assert!(rows.next().await.unwrap().is_none());
+    })
+    .await
+    .expect("originating IO did not wake the binding future");
+}
+
 #[tokio::test]
 async fn test_builder_read_only_rejects_writes_without_modifying_files() {
     let dir = tempfile::tempdir().expect("temporary directory must be created");

@@ -4,7 +4,7 @@ use std::{
     future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock,
+        Arc, OnceLock, Weak,
     },
     task::{Poll, Waker},
 };
@@ -33,7 +33,8 @@ impl Future for Completion {
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         self.set_waker(cx.waker());
-        if self.finished() {
+        self.step_io();
+        if self.finished() && self.io_finished() {
             self.wake();
             let res = self
                 .get_error()
@@ -47,36 +48,13 @@ impl Future for Completion {
 #[derive(Debug, Default)]
 struct ContextInner {
     waker: Option<Waker>,
+    parent: Option<Context>,
     // TODO: add abort signal
 }
 
 #[derive(Debug, Clone)]
 pub struct Context {
     inner: Arc<Mutex<ContextInner>>,
-}
-
-impl ContextInner {
-    pub fn new() -> Self {
-        Self { waker: None }
-    }
-
-    pub fn wake(&mut self) {
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
-        }
-    }
-
-    pub fn set_waker(&mut self, waker: &Waker) {
-        if let Some(curr_waker) = self.waker.as_mut() {
-            // only call and change waker if it would awake a different task
-            if !curr_waker.will_wake(waker) {
-                let prev_waker = std::mem::replace(curr_waker, waker.clone());
-                prev_waker.wake();
-            }
-        } else {
-            self.waker = Some(waker.clone());
-        }
-    }
 }
 
 impl Default for Context {
@@ -88,16 +66,38 @@ impl Default for Context {
 impl Context {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(ContextInner::new())),
+            inner: Arc::new(Mutex::new(ContextInner::default())),
         }
     }
 
     pub fn wake(&self) {
-        self.inner.lock().wake();
+        let (waker, parent) = {
+            let mut inner = self.inner.lock();
+            (inner.waker.take(), inner.parent.clone())
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        if let Some(parent) = parent {
+            parent.wake();
+        }
     }
 
     pub fn set_waker(&self, waker: &Waker) {
-        self.inner.lock().set_waker(waker);
+        let previous = {
+            let mut inner = self.inner.lock();
+            if inner
+                .waker
+                .as_ref()
+                .is_some_and(|current| current.will_wake(waker))
+            {
+                return;
+            }
+            inner.waker.replace(waker.clone())
+        };
+        if let Some(previous) = previous {
+            previous.wake();
+        }
     }
 }
 
@@ -115,6 +115,7 @@ pub(super) struct CompletionInner {
     /// Keeps the write buffer alive for async I/O backends (io_uring, VFS)
     /// where pwrite returns before the kernel has consumed the buffer.
     write_buffer: OnceLock<Arc<Buffer>>,
+    io: OnceLock<Arc<CompletionIo>>,
 }
 
 impl fmt::Debug for CompletionInner {
@@ -161,12 +162,13 @@ impl CompletionGroup {
             outstanding: AtomicUsize::new(1),
             complete: Box::new(callback),
             result: OnceLock::new(),
-            self_completion: OnceLock::new(),
+            self_completion: Mutex::new(None),
+            children: Mutex::new(Vec::new()),
         });
         let completion = Completion::new(CompletionType::Group(GroupCompletion {
             inner: inner.clone(),
         }));
-        let _ = inner.self_completion.set(completion.clone());
+        *inner.self_completion.lock() = Some(completion.clone());
         Self {
             completions: Vec::new(),
             completion,
@@ -188,6 +190,18 @@ impl CompletionGroup {
             !c.finished(),
             "completion was added to a group after it finished"
         );
+        self.inner
+            .children
+            .lock()
+            .push(Arc::downgrade(c.get_inner()));
+        self.completion
+            .get_inner()
+            .io()
+            .children
+            .lock()
+            .push(c.get_inner().io().clone());
+        c.get_inner().context.inner.lock().parent =
+            Some(self.completion.get_inner().context.clone());
     }
 
     /// The children added so far. Used by error paths that need to
@@ -242,7 +256,8 @@ struct GroupCompletionInner {
     /// Cached result after all completions finish
     result: OnceLock<Option<CompletionError>>,
     /// Reference to the group's own Completion for notifying parents
-    self_completion: OnceLock<Completion>,
+    self_completion: Mutex<Option<Completion>>,
+    children: Mutex<Vec<Weak<CompletionInner>>>,
 }
 
 impl GroupCompletion {
@@ -267,15 +282,23 @@ impl GroupCompletionInner {
         }
         let prev = self.outstanding.fetch_sub(1, Ordering::SeqCst);
         turso_assert!(prev > 0, "completion group counted below zero");
-        let group_completion = self
-            .self_completion
-            .get()
-            .expect("group completion is set in CompletionGroup::new");
+        let group_completion = {
+            let mut completion = self.self_completion.lock();
+            if prev == 1 {
+                completion.take()
+            } else {
+                completion.clone()
+            }
+        };
         if prev > 1 {
             // Progress wake so the waiter keeps driving io.step.
-            group_completion.wake();
+            if let Some(completion) = group_completion {
+                completion.wake();
+            }
             return;
         }
+        let group_completion =
+            group_completion.expect("group completion is set in CompletionGroup::new");
         // Set result to Some(None) on success so succeeded() returns true.
         let _ = self.result.set(None);
         let result = self.result.get().and_then(|e| *e);
@@ -315,7 +338,12 @@ impl CompletionInner {
             context: Context::new(),
             parent: OnceLock::new(),
             write_buffer: OnceLock::new(),
+            io: OnceLock::new(),
         }
+    }
+
+    fn io(&self) -> &Arc<CompletionIo> {
+        self.io.get_or_init(|| Arc::new(CompletionIo::default()))
     }
 }
 
@@ -402,18 +430,40 @@ impl Completion {
     /// without waking anything, and since `step()` is the only thing that
     /// drains the CQ, the resubmitted chunks pile up and the task deadlocks.
     pub fn wake_progress(&self) {
-        if let Some(inner) = &self.inner {
-            if let Some(group) = inner.parent.get() {
-                if let Some(group_completion) = group.self_completion.get() {
-                    group_completion.wake();
-                }
-            }
-            inner.context.wake();
+        self.wake();
+    }
+
+    #[cfg(all(target_family = "unix", not(miri)))]
+    pub(super) fn progress_context(&self) -> Context {
+        self.get_inner().context.clone()
+    }
+
+    #[cfg(all(target_family = "unix", not(miri)))]
+    pub(super) fn set_io_owner(&self, owner: Arc<dyn CompletionOwner>) {
+        assert!(self.get_inner().io().owner.set(owner).is_ok());
+    }
+
+    pub(crate) fn step_io(&self) {
+        if let Some(io) = self.inner.as_ref().and_then(|inner| inner.io.get()) {
+            io.step();
         }
     }
 
+    pub(crate) fn wait_for_io(&self) {
+        if let Some(io) = self.inner.as_ref().and_then(|inner| inner.io.get()) {
+            io.wait();
+        }
+    }
+
+    pub(crate) fn io_finished(&self) -> bool {
+        self.inner
+            .as_ref()
+            .and_then(|inner| inner.io.get())
+            .is_none_or(|io| io.finished())
+    }
+
     pub fn set_waker(&self, waker: &Waker) {
-        if self.finished() || self.inner.is_none() {
+        if (self.finished() && self.io_finished()) || self.inner.is_none() {
             waker.wake_by_ref();
         } else {
             self.get_inner().context.set_waker(waker);
@@ -488,7 +538,16 @@ impl Completion {
     }
 
     pub fn abort(&self) {
-        self.error(CompletionError::Aborted);
+        if let Some(inner) = &self.inner {
+            if let CompletionType::Group(group) = &inner.completion_type {
+                let children = group.inner.children.lock().clone();
+                for child in children.into_iter().filter_map(|child| child.upgrade()) {
+                    Completion { inner: Some(child) }.abort();
+                }
+            } else {
+                self.error(CompletionError::Aborted);
+            }
+        }
     }
 
     fn callback(&self, result: Result<i32, CompletionError>) {
@@ -540,6 +599,45 @@ impl Completion {
             CompletionType::Read(ref r) => r,
             _ => unreachable!(),
         }
+    }
+}
+
+pub(super) trait CompletionOwner: Send + Sync {
+    fn step(&self);
+    fn wait(&self);
+    fn finished(&self) -> bool;
+}
+
+#[derive(Default)]
+struct CompletionIo {
+    owner: OnceLock<Arc<dyn CompletionOwner>>,
+    children: Mutex<Vec<Arc<CompletionIo>>>,
+}
+
+impl CompletionIo {
+    fn step(&self) {
+        if let Some(owner) = self.owner.get() {
+            owner.step();
+        }
+        let children = self.children.lock().clone();
+        for child in children {
+            child.step();
+        }
+    }
+
+    fn wait(&self) {
+        if let Some(owner) = self.owner.get() {
+            owner.wait();
+        }
+        let children = self.children.lock().clone();
+        for child in children {
+            child.wait();
+        }
+    }
+
+    fn finished(&self) -> bool {
+        self.owner.get().is_none_or(|owner| owner.finished())
+            && self.children.lock().iter().all(|child| child.finished())
     }
 }
 

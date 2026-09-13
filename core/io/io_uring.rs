@@ -463,9 +463,11 @@ impl IO for UringIO {
     }
 
     fn cancel(&self, completions: &[Completion]) -> Result<()> {
+        completions.iter().for_each(Completion::wait_for_io);
+        completions.iter().for_each(Completion::abort);
+        completions.iter().for_each(Completion::step_io);
         let mut state = self.state.lock();
         for c in completions {
-            c.abort();
             // dont want to leak the refcount bump with `get_key`/into_raw here, so we use as_ptr
             let e = io_uring::opcode::AsyncCancel::new(Arc::as_ptr(c.get_inner()) as u64)
                 .build()

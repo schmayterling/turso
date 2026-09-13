@@ -2433,8 +2433,9 @@ impl Program {
             .io_completions
             .as_ref()
             .expect("the caller checked the completion slot");
+        io.set_waker(waker);
+        io.0.step_io();
         if !io.finished() {
-            io.set_waker(waker);
             return Some(ProgramStep::IO);
         }
         if let Some(err) = io.get_error() {
@@ -2491,6 +2492,7 @@ impl Program {
             Ok(IOResult::IO(io)) => {
                 state.pending_fail_prepare_error = Some(fail_error);
                 io.set_waker(waker);
+                io.0.step_io();
                 if io.is_explicit_yield() {
                     return Some(ProgramStep::Yield);
                 }
@@ -2609,6 +2611,7 @@ impl Program {
         waker: Option<&Waker>,
     ) -> Option<ProgramStep> {
         io.set_waker(waker);
+        io.0.step_io();
         if io.is_explicit_yield() {
             // Yield: return control to the cooperative scheduler so
             // other connections can make progress (e.g. release a
@@ -3255,6 +3258,15 @@ impl Program {
         }
 
         let mut abort_error: Option<LimboError> = None;
+        if let Some(io) = state.io_completions.take() {
+            if let Err(err) = pager.io.drain_completions(std::slice::from_ref(&io.0)) {
+                capture_abort_error(
+                    &mut abort_error,
+                    err,
+                    "Failed to drain pending IO during abort",
+                );
+            }
+        }
         state.explicit_checkpoint_guard = None;
         // PRAGMA journal_mode owns its MVCC checkpoint in active_op_state rather
         // than commit_state. Clean it before transaction abort logic inspects

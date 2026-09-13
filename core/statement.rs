@@ -293,6 +293,7 @@ fn combine_arithmetic_primitive(
 pub struct Statement {
     pub(crate) program: vdbe::Program,
     state: vdbe::ProgramState,
+    external_io: Option<crate::types::IOCompletions>,
     pager: Arc<Pager>,
     /// indicates if the statement is a NORMAL/EXPLAIN/EXPLAIN QUERY PLAN
     query_mode: QueryMode,
@@ -391,6 +392,7 @@ impl Statement {
         Self {
             program,
             state,
+            external_io: None,
             pager,
             query_mode,
             busy: false,
@@ -509,7 +511,10 @@ impl Statement {
     /// Returns None if no IO is pending.
     /// This is used by async state machines that need to yield the completions.
     pub fn take_io_completions(&mut self) -> Option<crate::types::IOCompletions> {
-        self.state.io_completions.take()
+        let io = self.state.io_completions.take()?;
+        assert!(self.external_io.is_none());
+        self.external_io = Some(crate::types::IOCompletions(io.0.clone()));
+        Some(io)
     }
 
     fn arm_query_timeout_if_needed(&mut self) {
@@ -560,6 +565,7 @@ impl Statement {
     /// gated behind cheap flag tests and kept out of line. A row in the middle
     /// of a scan runs only the interpreter call and the result-row bookkeeping.
     fn _step(&mut self, waker: Option<&Waker>) -> Result<StepResult> {
+        self.restore_external_io();
         if matches!(self.state.execution_state, ProgramExecutionState::Init)
             || !self.counted_as_active_root
             || self.busy_handler_state.is_some()
@@ -770,6 +776,7 @@ impl Statement {
     /// The parent statement handles all of those concerns.
     #[inline]
     pub fn step_subprogram(&mut self) -> Result<StepResult> {
+        self.restore_external_io();
         self.program
             .step(&mut self.state, &self.pager, self.query_mode, None)
             .map_err(|err| *err)
@@ -1514,6 +1521,7 @@ impl Statement {
 
         let mut reset_error: Option<LimboError> = None;
 
+        self.restore_external_io();
         if let Some(io) = self.state.io_completions.take() {
             if let Err(err) = io.wait(self.pager.io.as_ref()) {
                 capture_reset_error(
@@ -1548,11 +1556,8 @@ impl Statement {
                             break;
                         }
                         Ok(vdbe::execute::InsnFunctionStepResult::IO) => {
-                            // halt() is re-entered until it finishes; the
-                            // IO loop runs once per attempt, as before the
-                            // completion was parked in the state.
-                            drop(self.state.take_suspended_io());
-                            if let Err(e) = self.pager.io.step() {
+                            let io = self.state.take_suspended_io();
+                            if let Err(e) = io.wait(self.pager.io.as_ref()) {
                                 capture_reset_error(
                                     &mut reset_error,
                                     e,
@@ -1659,6 +1664,13 @@ impl Statement {
             return Err(err);
         }
         Ok(())
+    }
+
+    fn restore_external_io(&mut self) {
+        if let Some(io) = self.external_io.take() {
+            assert!(self.state.io_completions.is_none());
+            self.state.io_completions = Some(io);
+        }
     }
 
     pub fn row(&self) -> Option<&Row> {

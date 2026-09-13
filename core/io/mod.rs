@@ -441,7 +441,9 @@ pub trait IO: Clock + Send + Sync {
     }
 
     fn cancel(&self, c: &[Completion]) -> Result<()> {
+        c.iter().for_each(Completion::wait_for_io);
         c.iter().for_each(|c| c.abort());
+        c.iter().for_each(Completion::step_io);
         Ok(())
     }
 
@@ -458,14 +460,20 @@ pub trait IO: Clock + Send + Sync {
     /// (`OnceLock`-backed), so the loop will terminate as soon as every
     /// caller-owned completion has had its CQE processed.
     fn drain_completions(&self, completions: &[Completion]) -> Result<()> {
+        completions.iter().for_each(Completion::wait_for_io);
+        completions.iter().for_each(Completion::step_io);
         while completions.iter().any(|c| !c.finished()) {
+            completions.iter().for_each(Completion::step_io);
             self.step()?;
         }
         Ok(())
     }
 
     fn wait_for_completion(&self, c: Completion) -> Result<()> {
+        c.wait_for_io();
+        c.step_io();
         while !c.finished() {
+            c.step_io();
             self.step()?
         }
         if let Some(inner) = &c.inner {
