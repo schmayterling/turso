@@ -4,35 +4,16 @@ use tempfile::TempDir;
 use turso_core::{LimboError, Numeric, StepResult, Value};
 
 #[turso_macros::test(mvcc)]
-fn ordered_distinct_uses_previous_row(tmp_db: TempDatabase) -> anyhow::Result<()> {
-    let conn = tmp_db.connect_limbo();
-    limbo_exec_rows(&conn, "CREATE TABLE t(a,b)");
-    limbo_exec_rows(&conn, "CREATE INDEX idx ON t(a)");
-    let rows = limbo_exec_rows(&conn, "EXPLAIN SELECT DISTINCT a FROM t");
-    let opcodes = rows
-        .iter()
-        .map(|row| match &row[1] {
-            rusqlite::types::Value::Text(opcode) => opcode.as_str(),
-            other => panic!("expected opcode, got {other:?}"),
-        })
-        .collect::<Vec<_>>();
-    assert!(!opcodes.contains(&"HashDistinct"), "{opcodes:?}");
-    assert!(!opcodes.contains(&"HashClear"), "{opcodes:?}");
-    assert!(
-        opcodes.contains(&"Ne") && opcodes.contains(&"Copy"),
-        "{opcodes:?}"
-    );
-    Ok(())
-}
-
-#[turso_macros::test(mvcc)]
 fn ordered_distinct_access_paths(tmp_db: TempDatabase) -> anyhow::Result<()> {
     let conn = tmp_db.connect_limbo();
     limbo_exec_rows(&conn, "CREATE TABLE t(a INTEGER,b)");
     limbo_exec_rows(&conn, "CREATE INDEX idx ON t(a ASC,b DESC)");
     limbo_exec_rows(&conn, "CREATE TABLE words(s TEXT COLLATE NOCASE)");
     limbo_exec_rows(&conn, "CREATE INDEX words_idx ON words(s)");
+    limbo_exec_rows(&conn, "CREATE TABLE untyped(a,b)");
+    limbo_exec_rows(&conn, "CREATE INDEX untyped_idx ON untyped(a)");
     for (query, ordered) in [
+        ("SELECT DISTINCT a FROM untyped", true),
         ("SELECT DISTINCT a,b FROM t INDEXED BY idx", true),
         (
             "SELECT DISTINCT a,b FROM t INDEXED BY idx ORDER BY a DESC,b ASC",

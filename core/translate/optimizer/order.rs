@@ -870,11 +870,9 @@ pub(crate) fn distinct_is_ordered(
     if !matches!(table.table, Table::BTree(_)) {
         return false;
     }
-    let (index, iter_dir) = match &table.op {
-        Operation::Scan(Scan::BTreeTable { index, iter_dir }) => (index.as_deref(), *iter_dir),
-        Operation::Search(Search::Seek { index, seek_def }) => {
-            (index.as_deref(), seek_def.iter_dir)
-        }
+    let index = match &table.op {
+        Operation::Scan(Scan::BTreeTable { index, .. })
+        | Operation::Search(Search::Seek { index, .. }) => index.as_deref(),
         _ => return false,
     };
     if index.is_some_and(|index| {
@@ -914,25 +912,17 @@ pub(crate) fn distinct_is_ordered(
         }
         let index_column = index.and_then(|index| index.columns.get(i));
         let order = index_column.map_or(SortOrder::Asc, |column| column.order);
-        let order = match iter_dir {
-            IterationDirection::Forwards => order,
-            IterationDirection::Backwards => match order {
-                SortOrder::Asc => SortOrder::Desc,
-                SortOrder::Desc => SortOrder::Asc,
-            },
-        };
         columns.push(ColumnOrder {
             table_id: table.internal_id,
             target,
             order,
             collation: collations[i],
-            nulls_order: index_column
-                .map(|column| column.effective_nulls_order_when_iterated(iter_dir)),
+            nulls_order: index_column.map(|column| column.effective_nulls_order()),
         });
     }
     btree_access_order_consumed(
         table,
-        iter_dir,
+        IterationDirection::Forwards,
         index,
         &[],
         &OrderTarget {
