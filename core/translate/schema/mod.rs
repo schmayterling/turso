@@ -1,12 +1,12 @@
 mod sqlite_schema_alter_rows;
 mod sqlite_schema_rows;
 
-pub use sqlite_schema_rows::SqliteCatalog;
 pub(crate) use sqlite_schema_rows::{
     alloc_sqlite_schema_cursor, emit_create_internal_table, emit_delete_sequence_backing_table_row,
     emit_open_sqlite_schema_cursor, emit_schema_entry, open_sqlite_schema_for_write,
     SchemaEntryType,
 };
+pub use sqlite_schema_rows::{create_view_sql, SqliteCatalog};
 
 use crate::dialect::{AutomaticIndex, CatalogCmd, CmdContext, CreateTable, DropTable, TableText};
 use crate::sync::Arc;

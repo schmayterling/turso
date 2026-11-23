@@ -58,6 +58,31 @@ fn libpg_query_stack_depth_error_is_too_complex() {
     );
 }
 
+#[test]
+fn view_whose_stored_text_does_not_parse_is_too_complex() {
+    // core stores a view as SQLite text, where each `+` adds two levels of
+    // expression depth, and the SQLite parser allows 100.
+    let fits = format!("CREATE VIEW fits AS SELECT 1{} AS x", "+1".repeat(50));
+    let too_deep = format!("CREATE VIEW too_deep AS SELECT 1{} AS x", "+1".repeat(51));
+    let created = on_worker_stack(move || {
+        let db = TempDatabase::builder().build();
+        let conn = db.connect_postgres();
+        conn.execute(&fits).unwrap();
+        let refused = conn.execute(&too_deep).map_err(error_text);
+        drop(conn);
+        (db.reopen(), refused)
+    });
+    let (db, refused) = created;
+    assert_eq!(
+        refused,
+        Err("54001: view \"too_deep\" cannot be stored: \
+             Expression tree is too large (maximum depth 100)"
+            .to_string())
+    );
+    let value = on_worker_stack(move || value_in(&db, "SELECT x FROM fits"));
+    assert_eq!(value, Ok("51".to_string()));
+}
+
 /// `SELECT (SELECT (... (SELECT 1)))` with `depth` nested subqueries.
 fn nested_scalar_subqueries(depth: usize) -> String {
     format!("SELECT {}1{}", "(SELECT ".repeat(depth), ")".repeat(depth))
@@ -81,19 +106,30 @@ fn cte_chain(length: usize) -> String {
 /// stack. Returns the first value of the first row, or the SQLSTATE and the
 /// message of the error.
 fn first_value(sql: String) -> Result<String, String> {
+    on_worker_stack(move || value_in(&TempDatabase::builder().build(), &sql))
+}
+
+/// The first value of the first row of `sql` in `db`, or the SQLSTATE and
+/// the message of the error.
+fn value_in(db: &TempDatabase, sql: &str) -> Result<String, String> {
+    let conn = db.connect_postgres();
+    let mut statement = conn
+        .query(sql)
+        .map_err(error_text)?
+        .expect("a SELECT returns rows");
+    let rows = statement.run_collect_rows().map_err(error_text)?;
+    Ok(rows[0][0].to_string())
+}
+
+fn error_text(error: turso_pg::Error) -> String {
+    format!("{}: {error}", error.sqlstate)
+}
+
+/// Runs `f` on a thread with [WORKER_STACK] bytes of stack.
+fn on_worker_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()
         .stack_size(WORKER_STACK)
-        .spawn(move || {
-            let db = TempDatabase::builder().build();
-            let conn = db.connect_postgres();
-            let report = |error: turso_pg::Error| format!("{}: {error}", error.sqlstate);
-            let mut statement = conn
-                .query(&sql)
-                .map_err(report)?
-                .expect("a SELECT returns rows");
-            let rows = statement.run_collect_rows().map_err(report)?;
-            Ok(rows[0][0].to_string())
-        })
+        .spawn(f)
         .expect("spawn the thread of the statement")
         .join()
         .expect("the thread of the statement does not panic")

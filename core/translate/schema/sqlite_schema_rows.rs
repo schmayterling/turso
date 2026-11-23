@@ -817,7 +817,7 @@ fn emit_drop_view_row(
 }
 
 /// The SQL text to store for a new view or materialized view.
-fn create_view_sql(
+pub fn create_view_sql(
     view_kind: &str,
     view_name: &str,
     columns: &[ast::IndexedColumn],

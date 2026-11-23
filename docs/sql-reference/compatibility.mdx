@@ -53,6 +53,10 @@ literal, so a statement close to the limit can fail because of a long
 literal.
 It reports the limit on the depth of nested queries with SQLSTATE 54001
 too.
+It refuses a `CREATE VIEW` with SQLSTATE 54001 when the SQL text that it
+would store for the view goes past the limits of the SQLite parser, such as
+the depth of an expression, because the view is read back from that text
+when the database is opened.
 
 The depth of nested queries counts subqueries in a `FROM` clause or in an
 expression, CTE bodies, and parenthesized `FROM` terms. It also counts each

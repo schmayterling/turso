@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use turso_core::ast;
+use turso_core::dialect::create_view_sql;
 use turso_core::namespace::NamespaceId;
 use turso_core::schema::{
     is_user_relation_name, BTreeTable, RelationKind, Schema, SQLITE_SEQUENCE_TABLE_NAME,
@@ -47,11 +48,11 @@ use turso_core::{
 use turso_core::MAIN_DB_ID;
 use turso_pg_parser::sqlstate::{
     SQLSTATE_DUPLICATE_OBJECT, SQLSTATE_FEATURE_NOT_SUPPORTED, SQLSTATE_INVALID_GRANT_OPERATION,
-    SQLSTATE_UNDEFINED_OBJECT,
+    SQLSTATE_STATEMENT_TOO_COMPLEX, SQLSTATE_UNDEFINED_OBJECT,
 };
 
 use crate::acl::{Acl, Privileges, PUBLIC_OID};
-use crate::catalog::{engine_role_by_name, role_oid, role_oid_by_name};
+use crate::catalog::{engine_role_by_name, role_oid, role_oid_by_name, PostgresDialect};
 use crate::descriptions::{emit_delete_comments, Dropped};
 use crate::error::sqlstate_error;
 use crate::policies::{self, TablePolicies};
@@ -491,6 +492,7 @@ impl Catalog for PostgresCatalog {
         ctx: &CmdContext<'_>,
         cmd: &CatalogCmd<'_>,
     ) -> turso_core::Result<()> {
+        refuse_view_text_that_does_not_parse(cmd)?;
         SqliteCatalog.emit(program, ctx, cmd)?;
         match cmd {
             CatalogCmd::CreateTable(table) => {
@@ -672,6 +674,28 @@ impl Catalog for PostgresCatalog {
 
     fn load_steps(&self) -> Vec<Box<dyn LoadStep>> {
         crate::schema_state::load_steps()
+    }
+}
+
+/// Refuses a new view whose SQL text, as core stores it in `sqlite_schema`,
+/// does not parse. The engine reads a view back from that text with the
+/// SQLite parser, whose limits on depth are lower than those of PostgreSQL, so
+/// such a view would be lost when the database is opened again. A
+/// materialized view needs no check, because the PostgreSQL frontend runs in
+/// MVCC mode, which has no materialized views.
+fn refuse_view_text_that_does_not_parse(cmd: &CatalogCmd<'_>) -> turso_core::Result<()> {
+    let CatalogCmd::CreateView(view) = cmd else {
+        return Ok(());
+    };
+    let written_name = view.written_name.as_ident();
+    let sql = create_view_sql("VIEW", &written_name, view.columns, view.select);
+    match turso_core::dialect::parse_statement(&PostgresDialect, &sql) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(sqlstate_error(
+            SQLSTATE_STATEMENT_TOO_COMPLEX,
+            format!("view \"{}\" cannot be stored: {error}", view.name),
+            None,
+        )),
     }
 }
 
