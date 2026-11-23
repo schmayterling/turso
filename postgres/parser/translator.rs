@@ -3,6 +3,7 @@
 // This module translates pg_query's PostgreSQL AST into Turso's SQL AST
 // representation, handling the semantic differences between PostgreSQL and SQLite.
 
+use crate::cmdtag::CommandTag;
 use crate::functions::{datetime_result_type, is_system_column, pg_func, Immutability};
 use crate::names::{
     extract_key_columns, is_default_schema, is_pg_catalog, object_name, schema_qualifier,
@@ -292,7 +293,10 @@ impl PostgreSQLTranslator {
             }
             NodeRef::CreateSeqStmt(seq) => self.translate_create_sequence(seq)?,
             NodeRef::AlterSeqStmt(alter) => self.translate_alter_sequence(alter)?,
-            other => return Err(ParseError::not_supported(unsupported_statement_name(other))),
+            other => {
+                let tag = CommandTag::from_node(other);
+                return Err(ParseError::not_supported(tag.diagnostic_name()));
+            }
         })
     }
 
@@ -10219,211 +10223,6 @@ fn camel_to_sql(s: &str) -> String {
     result
 }
 
-/// Names unsupported statements using PostgreSQL's raw command tags in `CreateCommandTag`.
-fn unsupported_statement_name(node: NodeRef<'_>) -> &'static str {
-    use pg_query::protobuf::{DiscardMode, ObjectType, VariableSetKind};
-
-    match node {
-        NodeRef::AlterCollationStmt(_) => "ALTER COLLATION",
-        NodeRef::AlterDatabaseRefreshCollStmt(_) => "ALTER DATABASE",
-        NodeRef::AlterDatabaseSetStmt(_) => "ALTER DATABASE",
-        NodeRef::AlterDatabaseStmt(_) => "ALTER DATABASE",
-        NodeRef::AlterDefaultPrivilegesStmt(_) => "ALTER DEFAULT PRIVILEGES",
-        NodeRef::AlterDomainStmt(_) => "ALTER DOMAIN",
-        NodeRef::AlterEnumStmt(_) => "ALTER TYPE",
-        NodeRef::AlterEventTrigStmt(_) => "ALTER EVENT TRIGGER",
-        NodeRef::AlterExtensionContentsStmt(_) => "ALTER EXTENSION",
-        NodeRef::AlterExtensionStmt(_) => "ALTER EXTENSION",
-        NodeRef::AlterFdwStmt(_) => "ALTER FOREIGN DATA WRAPPER",
-        NodeRef::AlterForeignServerStmt(_) => "ALTER SERVER",
-        NodeRef::AlterFunctionStmt(stmt) => match stmt.objtype() {
-            ObjectType::ObjectProcedure => "ALTER PROCEDURE",
-            ObjectType::ObjectRoutine => "ALTER ROUTINE",
-            _ => "ALTER FUNCTION",
-        },
-        NodeRef::AlterObjectDependsStmt(stmt) => alter_object_command_name(stmt.object_type()),
-        NodeRef::AlterObjectSchemaStmt(stmt) => alter_object_command_name(stmt.object_type()),
-        NodeRef::AlterOpFamilyStmt(_) => "ALTER OPERATOR FAMILY",
-        NodeRef::AlterOperatorStmt(_) => "ALTER OPERATOR",
-        NodeRef::AlterOwnerStmt(stmt) => alter_object_command_name(stmt.object_type()),
-        NodeRef::AlterPolicyStmt(_) => "ALTER POLICY",
-        NodeRef::AlterPublicationStmt(_) => "ALTER PUBLICATION",
-        NodeRef::AlterRoleSetStmt(_) => "ALTER ROLE",
-        NodeRef::AlterRoleStmt(_) => "ALTER ROLE",
-        NodeRef::AlterStatsStmt(_) => "ALTER STATISTICS",
-        NodeRef::AlterSubscriptionStmt(_) => "ALTER SUBSCRIPTION",
-        NodeRef::AlterSystemStmt(_) => "ALTER SYSTEM",
-        NodeRef::AlterTableMoveAllStmt(stmt) => alter_object_command_name(stmt.objtype()),
-        NodeRef::AlterTableSpaceOptionsStmt(_) => "ALTER TABLESPACE",
-        NodeRef::AlterTsconfigurationStmt(_) => "ALTER TEXT SEARCH CONFIGURATION",
-        NodeRef::AlterTsdictionaryStmt(_) => "ALTER TEXT SEARCH DICTIONARY",
-        NodeRef::AlterTypeStmt(_) => "ALTER TYPE",
-        NodeRef::AlterUserMappingStmt(_) => "ALTER USER MAPPING",
-        NodeRef::CallStmt(_) => "CALL",
-        NodeRef::CheckPointStmt(_) => "CHECKPOINT",
-        NodeRef::ClosePortalStmt(stmt) => {
-            if stmt.portalname.is_empty() {
-                "CLOSE CURSOR ALL"
-            } else {
-                "CLOSE CURSOR"
-            }
-        }
-        NodeRef::ClusterStmt(_) => "CLUSTER",
-        NodeRef::CommentStmt(_) => "COMMENT",
-        NodeRef::CompositeTypeStmt(_) => "CREATE TYPE",
-        NodeRef::ConstraintsSetStmt(_) => "SET CONSTRAINTS",
-        NodeRef::CreateAmStmt(_) => "CREATE ACCESS METHOD",
-        NodeRef::CreateCastStmt(_) => "CREATE CAST",
-        NodeRef::CreateConversionStmt(_) => "CREATE CONVERSION",
-        NodeRef::CreateEventTrigStmt(_) => "CREATE EVENT TRIGGER",
-        NodeRef::CreateExtensionStmt(_) => "CREATE EXTENSION",
-        NodeRef::CreateFdwStmt(_) => "CREATE FOREIGN DATA WRAPPER",
-        NodeRef::CreateForeignServerStmt(_) => "CREATE SERVER",
-        NodeRef::CreateForeignTableStmt(_) => "CREATE FOREIGN TABLE",
-        NodeRef::CreateFunctionStmt(stmt) => {
-            if stmt.is_procedure {
-                "CREATE PROCEDURE"
-            } else {
-                "CREATE FUNCTION"
-            }
-        }
-        NodeRef::CreateOpClassStmt(_) => "CREATE OPERATOR CLASS",
-        NodeRef::CreateOpFamilyStmt(_) => "CREATE OPERATOR FAMILY",
-        NodeRef::CreatePlangStmt(_) => "CREATE LANGUAGE",
-        NodeRef::CreatePublicationStmt(_) => "CREATE PUBLICATION",
-        NodeRef::CreateRangeStmt(_) => "CREATE TYPE",
-        NodeRef::CreateSchemaStmt(_) => "CREATE SCHEMA",
-        NodeRef::CreateStatsStmt(_) => "CREATE STATISTICS",
-        NodeRef::CreateSubscriptionStmt(_) => "CREATE SUBSCRIPTION",
-        NodeRef::CreateTableSpaceStmt(_) => "CREATE TABLESPACE",
-        NodeRef::CreateTransformStmt(_) => "CREATE TRANSFORM",
-        NodeRef::CreateTrigStmt(_) => "CREATE TRIGGER",
-        NodeRef::CreateUserMappingStmt(_) => "CREATE USER MAPPING",
-        NodeRef::CreatedbStmt(_) => "CREATE DATABASE",
-        NodeRef::DeallocateStmt(stmt) => {
-            if stmt.name.is_empty() {
-                "DEALLOCATE ALL"
-            } else {
-                "DEALLOCATE"
-            }
-        }
-        NodeRef::DeclareCursorStmt(_) => "DECLARE CURSOR",
-        NodeRef::DefineStmt(stmt) => match stmt.kind() {
-            ObjectType::ObjectAccessMethod => "CREATE ACCESS METHOD",
-            ObjectType::ObjectAggregate => "CREATE AGGREGATE",
-            ObjectType::ObjectCollation => "CREATE COLLATION",
-            ObjectType::ObjectOperator => "CREATE OPERATOR",
-            ObjectType::ObjectTsconfiguration => "CREATE TEXT SEARCH CONFIGURATION",
-            ObjectType::ObjectTsdictionary => "CREATE TEXT SEARCH DICTIONARY",
-            ObjectType::ObjectTsparser => "CREATE TEXT SEARCH PARSER",
-            ObjectType::ObjectTstemplate => "CREATE TEXT SEARCH TEMPLATE",
-            ObjectType::ObjectType => "CREATE TYPE",
-            _ => "this statement",
-        },
-        NodeRef::DiscardStmt(stmt) => match stmt.target() {
-            DiscardMode::DiscardAll => "DISCARD ALL",
-            DiscardMode::DiscardPlans => "DISCARD PLANS",
-            DiscardMode::DiscardSequences => "DISCARD SEQUENCES",
-            DiscardMode::DiscardTemp => "DISCARD TEMP",
-            DiscardMode::Undefined => "DISCARD",
-        },
-        NodeRef::DoStmt(_) => "DO",
-        NodeRef::DropOwnedStmt(_) => "DROP OWNED",
-        NodeRef::DropSubscriptionStmt(_) => "DROP SUBSCRIPTION",
-        NodeRef::DropTableSpaceStmt(_) => "DROP TABLESPACE",
-        NodeRef::DropUserMappingStmt(_) => "DROP USER MAPPING",
-        NodeRef::DropdbStmt(_) => "DROP DATABASE",
-        NodeRef::ExecuteStmt(_) => "EXECUTE",
-        NodeRef::FetchStmt(stmt) => {
-            if stmt.ismove {
-                "MOVE"
-            } else {
-                "FETCH"
-            }
-        }
-        NodeRef::GrantStmt(stmt) => {
-            if stmt.is_grant {
-                "GRANT"
-            } else {
-                "REVOKE"
-            }
-        }
-        NodeRef::ImportForeignSchemaStmt(_) => "IMPORT FOREIGN SCHEMA",
-        NodeRef::ListenStmt(_) => "LISTEN",
-        NodeRef::LoadStmt(_) => "LOAD",
-        NodeRef::MergeStmt(_) => "MERGE",
-        NodeRef::NotifyStmt(_) => "NOTIFY",
-        NodeRef::PrepareStmt(_) => "PREPARE",
-        NodeRef::ReassignOwnedStmt(_) => "REASSIGN OWNED",
-        NodeRef::RefreshMatViewStmt(_) => "REFRESH MATERIALIZED VIEW",
-        NodeRef::ReindexStmt(_) => "REINDEX",
-        NodeRef::RuleStmt(_) => "CREATE RULE",
-        NodeRef::SecLabelStmt(_) => "SECURITY LABEL",
-        NodeRef::UnlistenStmt(_) => "UNLISTEN",
-        NodeRef::VacuumStmt(stmt) => {
-            if stmt.is_vacuumcmd {
-                "VACUUM"
-            } else {
-                "ANALYZE"
-            }
-        }
-        NodeRef::VariableSetStmt(stmt) => match stmt.kind() {
-            VariableSetKind::VarReset | VariableSetKind::VarResetAll => "RESET",
-            _ => "SET",
-        },
-        NodeRef::VariableShowStmt(_) => "SHOW",
-        _ => "this statement",
-    }
-}
-
-fn alter_object_command_name(object: pg_query::protobuf::ObjectType) -> &'static str {
-    use pg_query::protobuf::ObjectType;
-
-    match object {
-        ObjectType::ObjectAggregate => "ALTER AGGREGATE",
-        ObjectType::ObjectCast => "ALTER CAST",
-        ObjectType::ObjectCollation => "ALTER COLLATION",
-        ObjectType::ObjectConversion => "ALTER CONVERSION",
-        ObjectType::ObjectDatabase => "ALTER DATABASE",
-        ObjectType::ObjectDomain | ObjectType::ObjectDomconstraint => "ALTER DOMAIN",
-        ObjectType::ObjectEventTrigger => "ALTER EVENT TRIGGER",
-        ObjectType::ObjectExtension => "ALTER EXTENSION",
-        ObjectType::ObjectFdw => "ALTER FOREIGN DATA WRAPPER",
-        ObjectType::ObjectForeignTable => "ALTER FOREIGN TABLE",
-        ObjectType::ObjectFunction => "ALTER FUNCTION",
-        ObjectType::ObjectIndex => "ALTER INDEX",
-        ObjectType::ObjectLanguage => "ALTER LANGUAGE",
-        ObjectType::ObjectLargeobject => "ALTER LARGE OBJECT",
-        ObjectType::ObjectMatview => "ALTER MATERIALIZED VIEW",
-        ObjectType::ObjectOperator => "ALTER OPERATOR",
-        ObjectType::ObjectOpclass => "ALTER OPERATOR CLASS",
-        ObjectType::ObjectOpfamily => "ALTER OPERATOR FAMILY",
-        ObjectType::ObjectPolicy => "ALTER POLICY",
-        ObjectType::ObjectProcedure => "ALTER PROCEDURE",
-        ObjectType::ObjectPublication => "ALTER PUBLICATION",
-        ObjectType::ObjectRole => "ALTER ROLE",
-        ObjectType::ObjectRoutine => "ALTER ROUTINE",
-        ObjectType::ObjectRule => "ALTER RULE",
-        ObjectType::ObjectSchema => "ALTER SCHEMA",
-        ObjectType::ObjectSequence => "ALTER SEQUENCE",
-        ObjectType::ObjectForeignServer => "ALTER SERVER",
-        ObjectType::ObjectStatisticExt => "ALTER STATISTICS",
-        ObjectType::ObjectSubscription => "ALTER SUBSCRIPTION",
-        ObjectType::ObjectTable | ObjectType::ObjectColumn | ObjectType::ObjectTabconstraint => {
-            "ALTER TABLE"
-        }
-        ObjectType::ObjectTablespace => "ALTER TABLESPACE",
-        ObjectType::ObjectTsconfiguration => "ALTER TEXT SEARCH CONFIGURATION",
-        ObjectType::ObjectTsdictionary => "ALTER TEXT SEARCH DICTIONARY",
-        ObjectType::ObjectTsparser => "ALTER TEXT SEARCH PARSER",
-        ObjectType::ObjectTstemplate => "ALTER TEXT SEARCH TEMPLATE",
-        ObjectType::ObjectTrigger => "ALTER TRIGGER",
-        ObjectType::ObjectAttribute | ObjectType::ObjectType => "ALTER TYPE",
-        ObjectType::ObjectView => "ALTER VIEW",
-        _ => "ALTER",
-    }
-}
-
 /// Returns a human-readable name for an `AlterTableType` variant.
 /// Strips the "At" prefix and converts CamelCase → SQL words.
 fn alter_subtype_name(subtype: pg_query::protobuf::AlterTableType) -> String {
@@ -10881,6 +10680,16 @@ mod tests {
                 "CREATE PROCEDURE",
             ),
             (
+                "alter procedure",
+                "ALTER PROCEDURE p() SECURITY DEFINER",
+                "ALTER PROCEDURE",
+            ),
+            (
+                "alter routine",
+                "ALTER ROUTINE r() IMMUTABLE",
+                "ALTER ROUTINE",
+            ),
+            (
                 "declare cursor under explain",
                 "EXPLAIN DECLARE c CURSOR FOR SELECT 1",
                 "DECLARE CURSOR",
@@ -10894,11 +10703,6 @@ mod tests {
             ("discard plans", "DISCARD PLANS", "DISCARD PLANS"),
             ("analyze table", "ANALYZE t", "ANALYZE"),
             ("deallocate all", "DEALLOCATE ALL", "DEALLOCATE ALL"),
-            (
-                "create table like",
-                "CREATE TABLE t (LIKE other)",
-                "CREATE TABLE ... (LIKE ...)",
-            ),
         ] {
             let parsed = crate::parse(sql).expect(case);
             let error = translator.translate_with_prereqs(&parsed).expect_err(case);
@@ -10923,6 +10727,7 @@ mod tests {
         let Some(NodeEnum::CreateStmt(create)) = &mut stmt.node else {
             panic!("expected CREATE TABLE");
         };
+        // The SQL grammar only emits column definitions, constraints, and LIKE clauses here.
         create.table_elts.push(Node {
             node: Some(NodeEnum::Integer(Integer { ival: 1 })),
         });

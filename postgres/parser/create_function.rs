@@ -374,10 +374,7 @@ fn check_body_statements(statements: &pg_query::ParseResult) -> Result<(), Parse
         )),
         _ => Err(ParseError::not_supported(format!(
             "{} in a function body",
-            match CommandTag::of(statements) {
-                CommandTag::Unknown => "a utility statement",
-                tag => tag.name(),
-            }
+            CommandTag::of(statements).diagnostic_name()
         ))),
     }
 }

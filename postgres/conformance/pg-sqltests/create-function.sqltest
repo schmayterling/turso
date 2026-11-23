@@ -266,7 +266,7 @@ expect {
 }
 @sqlstate 0A000
 expect @tursopg error {
-    a utility statement in a function body is not supported
+    NOTIFY in a function body is not supported
 }
 
 @compat-gap "syntax:create-function"
