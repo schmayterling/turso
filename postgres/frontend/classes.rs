@@ -38,6 +38,7 @@ use turso_core::schema::{
 };
 use turso_core::security::permission::{Action, Object, PermissionDenied};
 use turso_core::security::roles::RoleId;
+use turso_core::Dialect;
 use turso_core::{
     emit_sqlite_sequence_row_read, emit_sqlite_sequence_row_write, to_u32, AccessStatement,
     Catalog, CatalogApply, CatalogCmd, CmdContext, CmdOrigin, CmpInsFlags, CollationSeq,
@@ -493,6 +494,7 @@ impl Catalog for PostgresCatalog {
         cmd: &CatalogCmd<'_>,
     ) -> turso_core::Result<()> {
         refuse_view_text_that_does_not_parse(cmd)?;
+        refuse_alter_table_whose_text_does_not_parse(ctx, cmd)?;
         SqliteCatalog.emit(program, ctx, cmd)?;
         match cmd {
             CatalogCmd::CreateTable(table) => {
@@ -694,6 +696,86 @@ fn refuse_view_text_that_does_not_parse(cmd: &CatalogCmd<'_>) -> turso_core::Res
         Err(error) => Err(sqlstate_error(
             SQLSTATE_STATEMENT_TOO_COMPLEX,
             format!("view \"{}\" cannot be stored: {error}", view.name),
+            None,
+        )),
+    }
+}
+
+/// Refuses an `ALTER TABLE` after which core would store SQL text for a
+/// table that does not parse. The PostgreSQL text of a new table is stored as
+/// written, but an `ALTER TABLE` stores SQLite text instead, and the engine
+/// parses that text with the SQLite parser when the database is opened. Its
+/// limits on depth are lower than those of PostgreSQL, so a deep `CHECK` or
+/// `DEFAULT` would leave a database that cannot be opened.
+fn refuse_alter_table_whose_text_does_not_parse(
+    ctx: &CmdContext<'_>,
+    cmd: &CatalogCmd<'_>,
+) -> turso_core::Result<()> {
+    match cmd {
+        CatalogCmd::AddColumn(column) => refuse_table_whose_text_does_not_parse(column.table),
+        CatalogCmd::DropColumn(column) => refuse_table_whose_text_does_not_parse(column.table),
+        CatalogCmd::RenameTable(table) if table.is_virtual => Ok(()),
+        CatalogCmd::RenameTable(table) => refuse_renamed_tables_whose_text_does_not_parse(
+            ctx.schema,
+            table.namespace,
+            table.old_name,
+        ),
+        CatalogCmd::RenameColumn(column) => refuse_renamed_tables_whose_text_does_not_parse(
+            ctx.schema,
+            column.namespace,
+            column.table,
+        ),
+        // A form of ALTER COLUMN that the translator accepts rewrites the
+        // table's text, so it needs the check of a rename here.
+        CatalogCmd::AlterColumn(_) => {
+            unreachable!("the PostgreSQL translator refuses every form of ALTER COLUMN")
+        }
+        // These store no SQLite text for a table that already exists.
+        CatalogCmd::CreateTable(_)
+        | CatalogCmd::CreateIndex(_)
+        | CatalogCmd::DropIndex(_)
+        | CatalogCmd::CreateSequence(_)
+        | CatalogCmd::DropSequence(_)
+        | CatalogCmd::DropTable(_)
+        | CatalogCmd::CreateView(_)
+        | CatalogCmd::CreateMaterializedView(_)
+        | CatalogCmd::DropView(_) => Ok(()),
+    }
+}
+
+/// A rename rewrites the text of the table and of each table whose foreign
+/// key names it.
+fn refuse_renamed_tables_whose_text_does_not_parse(
+    schema: &Schema,
+    namespace: NamespaceId,
+    name: &str,
+) -> turso_core::Result<()> {
+    let Some(table) = schema.get_btree_table(namespace, name) else {
+        panic!("ALTER TABLE renames table \"{name}\", which is not in the schema");
+    };
+    refuse_table_whose_text_does_not_parse(&table)?;
+    for child_namespace in schema.namespace_ids() {
+        for child in schema
+            .tables(child_namespace)
+            .filter_map(|table| table.btree())
+        {
+            let names_the_table = child.foreign_keys.iter().any(|fk| {
+                fk.parent_namespace == namespace && fk.parent_table.eq_ignore_ascii_case(name)
+            });
+            if names_the_table {
+                refuse_table_whose_text_does_not_parse(&child)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn refuse_table_whose_text_does_not_parse(table: &BTreeTable) -> turso_core::Result<()> {
+    match PostgresDialect.parse_table_sql(&table.to_sql(), table.root_page) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(sqlstate_error(
+            SQLSTATE_STATEMENT_TOO_COMPLEX,
+            format!("table \"{}\" cannot be stored: {error}", table.name),
             None,
         )),
     }

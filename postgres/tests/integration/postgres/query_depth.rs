@@ -83,6 +83,75 @@ fn view_whose_stored_text_does_not_parse_is_too_complex() {
     assert_eq!(value, Ok("51".to_string()));
 }
 
+#[test]
+fn add_column_whose_table_text_does_not_parse_is_too_complex() {
+    // ALTER TABLE stores the table as SQLite text, as for a view.
+    let fits = format!(
+        "ALTER TABLE t ADD COLUMN fits int DEFAULT 1{}",
+        "+1".repeat(50)
+    );
+    let too_deep = format!(
+        "ALTER TABLE t ADD COLUMN too_deep int DEFAULT 1{}",
+        "+1".repeat(51)
+    );
+    let created = on_worker_stack(move || {
+        let db = TempDatabase::builder().build();
+        let conn = db.connect_postgres();
+        conn.execute("CREATE TABLE t (a int)").unwrap();
+        conn.execute(&fits).unwrap();
+        let refused = conn.execute(&too_deep).map_err(error_text);
+        conn.execute("INSERT INTO t (a) VALUES (1)").unwrap();
+        drop(conn);
+        (db.reopen(), refused)
+    });
+    let (db, refused) = created;
+    assert_eq!(
+        refused,
+        Err("54001: table \"t\" cannot be stored: \
+             Expression tree is too large (maximum depth 100)"
+            .to_string())
+    );
+    let value = on_worker_stack(move || value_in(&db, "SELECT fits FROM t"));
+    assert_eq!(value, Ok("51".to_string()));
+}
+
+#[test]
+fn alter_of_a_table_whose_text_does_not_parse_is_too_complex() {
+    // The table keeps its PostgreSQL text until an ALTER TABLE, and a flat
+    // PostgreSQL OR chain nests one level for each OR in SQLite text.
+    let ors = (0..120).map(|i| format!("a = {i}")).collect::<Vec<_>>();
+    let create = format!(
+        "CREATE TABLE t (a int CHECK ({}), c int REFERENCES p (id), e int)",
+        ors.join(" OR ")
+    );
+    // A rename of `p` rewrites the text of `t`, whose foreign key names it.
+    let alters = [
+        "ALTER TABLE t RENAME COLUMN c TO d",
+        "ALTER TABLE t RENAME TO u",
+        "ALTER TABLE t DROP COLUMN e",
+        "ALTER TABLE p RENAME COLUMN id TO key",
+        "ALTER TABLE p RENAME TO q",
+    ];
+    let created = on_worker_stack(move || {
+        let db = TempDatabase::builder().build();
+        let conn = db.connect_postgres();
+        conn.execute("CREATE TABLE p (id int PRIMARY KEY)").unwrap();
+        conn.execute("INSERT INTO p VALUES (8)").unwrap();
+        conn.execute(&create).unwrap();
+        let refused = alters.map(|alter| (alter, conn.execute(alter).map_err(error_text)));
+        conn.execute("INSERT INTO t VALUES (7, 8, 9)").unwrap();
+        drop(conn);
+        (db.reopen(), refused)
+    });
+    let (db, refused) = created;
+    let too_complex = Err("54001: table \"t\" cannot be stored: \
+         Expression tree is too large (maximum depth 100)"
+        .to_string());
+    assert_eq!(refused, alters.map(|alter| (alter, too_complex.clone())));
+    let value = on_worker_stack(move || value_in(&db, "SELECT c FROM t"));
+    assert_eq!(value, Ok("8".to_string()));
+}
+
 /// `SELECT (SELECT (... (SELECT 1)))` with `depth` nested subqueries.
 fn nested_scalar_subqueries(depth: usize) -> String {
     format!("SELECT {}1{}", "(SELECT ".repeat(depth), ")".repeat(depth))

@@ -57,6 +57,10 @@ It refuses a `CREATE VIEW` with SQLSTATE 54001 when the SQL text that it
 would store for the view goes past the limits of the SQLite parser, such as
 the depth of an expression, because the view is read back from that text
 when the database is opened.
+For the same reason, it refuses an `ALTER TABLE` that adds, drops or renames
+a column or renames a table when the SQLite text that core would store for
+the table, or for a table whose foreign key names it, goes past those
+limits, for example because of a deep `CHECK` or `DEFAULT`.
 
 The depth of nested queries counts subqueries in a `FROM` clause or in an
 expression, CTE bodies, and parenthesized `FROM` terms. It also counts each
