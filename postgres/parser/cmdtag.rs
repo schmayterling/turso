@@ -266,12 +266,7 @@ impl CommandTag {
             NodeRef::AlterExtensionStmt(_) => Self::AlterExtension,
             NodeRef::AlterFdwStmt(_) => Self::AlterForeignDataWrapper,
             NodeRef::AlterForeignServerStmt(_) => Self::AlterServer,
-            NodeRef::AlterFunctionStmt(stmt) => match stmt.objtype() {
-                object @ (ObjectType::ObjectFunction
-                | ObjectType::ObjectProcedure
-                | ObjectType::ObjectRoutine) => Self::alter(object),
-                _ => Self::Unknown,
-            },
+            NodeRef::AlterFunctionStmt(stmt) => Self::alter(stmt.objtype()),
             NodeRef::AlterObjectDependsStmt(stmt) => Self::alter(stmt.object_type()),
             NodeRef::AlterObjectSchemaStmt(stmt) => Self::alter(stmt.object_type()),
             NodeRef::AlterOpFamilyStmt(_) => Self::AlterOperatorFamily,
@@ -291,13 +286,8 @@ impl CommandTag {
             NodeRef::AlterUserMappingStmt(_) => Self::AlterUserMapping,
             NodeRef::CallStmt(_) => Self::Call,
             NodeRef::CheckPointStmt(_) => Self::Checkpoint,
-            NodeRef::ClosePortalStmt(stmt) => {
-                if stmt.portalname.is_empty() {
-                    Self::CloseCursorAll
-                } else {
-                    Self::CloseCursor
-                }
-            }
+            NodeRef::ClosePortalStmt(stmt) if stmt.portalname.is_empty() => Self::CloseCursorAll,
+            NodeRef::ClosePortalStmt(_) => Self::CloseCursor,
             NodeRef::ClusterStmt(_) => Self::Cluster,
             NodeRef::ConstraintsSetStmt(_) => Self::SetConstraints,
             NodeRef::CreateAmStmt(_) => Self::CreateAccessMethod,
@@ -318,13 +308,8 @@ impl CommandTag {
             NodeRef::CreateTransformStmt(_) => Self::CreateTransform,
             NodeRef::CreateUserMappingStmt(_) => Self::CreateUserMapping,
             NodeRef::CreatedbStmt(_) => Self::CreateDatabase,
-            NodeRef::DeallocateStmt(stmt) => {
-                if stmt.name.is_empty() {
-                    Self::DeallocateAll
-                } else {
-                    Self::Deallocate
-                }
-            }
+            NodeRef::DeallocateStmt(stmt) if stmt.name.is_empty() => Self::DeallocateAll,
+            NodeRef::DeallocateStmt(_) => Self::Deallocate,
             NodeRef::DeclareCursorStmt(_) => Self::DeclareCursor,
             NodeRef::DefineStmt(stmt) => match stmt.kind() {
                 ObjectType::ObjectAccessMethod => Self::CreateAccessMethod,
@@ -345,13 +330,8 @@ impl CommandTag {
             NodeRef::DropUserMappingStmt(_) => Self::DropUserMapping,
             NodeRef::DropdbStmt(_) => Self::DropDatabase,
             NodeRef::ExecuteStmt(_) => Self::Execute,
-            NodeRef::FetchStmt(stmt) => {
-                if stmt.ismove {
-                    Self::Move
-                } else {
-                    Self::Fetch
-                }
-            }
+            NodeRef::FetchStmt(stmt) if stmt.ismove => Self::Move,
+            NodeRef::FetchStmt(_) => Self::Fetch,
             NodeRef::ImportForeignSchemaStmt(_) => Self::ImportForeignSchema,
             NodeRef::ListenStmt(_) => Self::Listen,
             NodeRef::LoadStmt(_) => Self::Load,
