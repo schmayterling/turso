@@ -10628,6 +10628,125 @@ mod tests {
     use super::*;
 
     #[test]
+    fn characterizes_unsupported_statement_diagnostics() {
+        let translator = PostgreSQLTranslator::new();
+        for (case, sql, name) in [
+            (
+                "create extension",
+                "CREATE EXTENSION pgcrypto",
+                "CREATE EXTENSION",
+            ),
+            (
+                "create trigger",
+                "CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f()",
+                "CREATE TRIGGER",
+            ),
+            ("anonymous code block", "DO $$ BEGIN NULL; END $$", "DO"),
+            (
+                "alter system",
+                "ALTER SYSTEM SET log_min_messages = warning",
+                "ALTER SYSTEM",
+            ),
+            ("create database", "CREATE DATABASE d", "CREATEDB"),
+            (
+                "security label",
+                "SECURITY LABEL ON TABLE t IS 'private'",
+                "SEC LABEL",
+            ),
+            ("add collation", "CREATE COLLATION c FROM \"C\"", "DEFINE"),
+            (
+                "create composite type",
+                "CREATE TYPE pair AS (a int, b int)",
+                "COMPOSITE TYPE",
+            ),
+            (
+                "alter object owner",
+                "ALTER SCHEMA s OWNER TO r",
+                "ALTER OWNER",
+            ),
+            (
+                "alter object schema",
+                "ALTER VIEW v SET SCHEMA s",
+                "ALTER OBJECT SCHEMA",
+            ),
+            (
+                "alter extension dependency",
+                "ALTER FUNCTION f() DEPENDS ON EXTENSION e",
+                "ALTER OBJECT DEPENDS",
+            ),
+            (
+                "move all indexes",
+                "ALTER INDEX ALL IN TABLESPACE a SET TABLESPACE b",
+                "ALTER TABLE MOVE ALL",
+            ),
+            (
+                "create procedure",
+                "CREATE PROCEDURE p() LANGUAGE SQL AS $$ SELECT 1 $$",
+                "CREATE FUNCTION",
+            ),
+            (
+                "declare cursor under explain",
+                "EXPLAIN DECLARE c CURSOR FOR SELECT 1",
+                "DECLARE CURSOR",
+            ),
+            ("close one cursor", "CLOSE c", "CLOSE PORTAL"),
+            ("close all cursors", "CLOSE ALL", "CLOSE PORTAL"),
+            ("move cursor", "MOVE NEXT FROM c", "FETCH"),
+            ("fetch cursor", "FETCH NEXT FROM c", "FETCH"),
+            ("revoke privileges", "REVOKE SELECT ON t FROM r", "GRANT"),
+            ("reset setting", "RESET search_path", "VARIABLE SET"),
+            ("discard plans", "DISCARD PLANS", "DISCARD"),
+            ("analyze table", "ANALYZE t", "VACUUM"),
+            ("deallocate all", "DEALLOCATE ALL", "DEALLOCATE"),
+            (
+                "create table like",
+                "CREATE TABLE t (LIKE other)",
+                "CREATE TABLE ... (LIKE ...)",
+            ),
+        ] {
+            let parsed = crate::parse(sql).expect(case);
+            let error = translator.translate_with_prereqs(&parsed).expect_err(case);
+            let expected = format!("{name} is not supported");
+            let ParseError::Sqlstate { sqlstate, message } = error else {
+                panic!("{case}: expected a SQLSTATE error, got {error}");
+            };
+            assert_eq!(
+                (sqlstate, message.as_str()),
+                (SQLSTATE_FEATURE_NOT_SUPPORTED, expected.as_str()),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn characterizes_unsupported_create_table_element_diagnostic() {
+        use pg_query::protobuf::{node::Node as NodeEnum, Integer, Node};
+
+        let mut parsed = crate::parse("CREATE TABLE t (a int)").unwrap();
+        let stmt = parsed.protobuf.stmts[0].stmt.as_mut().unwrap();
+        let Some(NodeEnum::CreateStmt(create)) = &mut stmt.node else {
+            panic!("expected CREATE TABLE");
+        };
+        create.table_elts.push(Node {
+            node: Some(NodeEnum::Integer(Integer { ival: 1 })),
+        });
+
+        let error = PostgreSQLTranslator::new()
+            .translate_with_prereqs(&parsed)
+            .unwrap_err();
+        let ParseError::Sqlstate { sqlstate, message } = error else {
+            panic!("expected a SQLSTATE error, got {error}");
+        };
+        assert_eq!(
+            (sqlstate, message.as_str()),
+            (
+                SQLSTATE_FEATURE_NOT_SUPPORTED,
+                "CREATE TABLE element INTEGER is not supported"
+            )
+        );
+    }
+
+    #[test]
     fn frontend_stmt_names_each_kind_the_frontend_runs() {
         let kind = |sql: &str| {
             let parsed = crate::parse(sql).unwrap();
