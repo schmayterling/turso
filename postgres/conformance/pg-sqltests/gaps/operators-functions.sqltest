@@ -1358,15 +1358,12 @@ expect {
 expect @tursopg error {}
 
 # B-124: 64 nested scalar subqueries
-@compat-gap "syntax:nested-subquery"
 test nested-scalar-subqueries-64-deep {
     SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT 1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))));
 }
 expect {
     1
 }
-@sqlstate 42601
-expect @tursopg error {}
 
 # B-126: auth.role() reads the role claim
 @setup auth_role_from_claims_on_postgres
@@ -1423,16 +1420,12 @@ expect @tursopg {
 }
 
 # B-130: 16 nested scalar subqueries
-# Same cause as B-124. tursopg accepts 15 levels, so this is the first depth that fails.
-@compat-gap "syntax:nested-subquery"
 test nested-scalar-subqueries-16-deep {
     SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT (SELECT 1))))))))))))))));
 }
 expect {
     1
 }
-@sqlstate 42601
-expect @tursopg error {}
 
 # B-131: pg_options_to_table with a column alias list
 @compat-gap "function:pg_options_to_table"

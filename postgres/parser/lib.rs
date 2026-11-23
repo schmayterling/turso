@@ -3,6 +3,7 @@ pub mod copy;
 mod create_function;
 pub mod functions;
 mod names;
+mod parse_tree;
 mod policy_condition;
 use pg_query::NodeEnum;
 pub use pg_query::ParseResult;
@@ -79,7 +80,7 @@ impl FunctionTypeUse {
 
 /// Parse a PostgreSQL SQL statement using pg_query
 pub fn parse(sql: &str) -> Result<ParseResult, ParseError> {
-    pg_query::parse(sql, pg_query::ParserOptions::DEFAULT).map_err(parse_error)
+    parse_tree::parse_bounded(sql)?.map_err(parse_error)
 }
 
 /// The error for SQL that pg_query refuses. pg_query gives only the message

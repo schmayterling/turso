@@ -7,6 +7,7 @@ mod functions;
 mod gaps;
 mod namespace;
 mod parse_edge_cases;
+mod query_depth;
 mod role;
 mod row_security;
 mod sequence;

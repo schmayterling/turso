@@ -44,6 +44,14 @@ message.
 A `VALUES` list with many rows is one term. SQLite does not count the terms of
 a compound `SELECT` whose last term is `VALUES`, but Turso counts them.
 
+The PostgreSQL frontend refuses a statement whose PostgreSQL parse tree nests
+more than 450 levels deep, with SQLSTATE 54001 `stack depth limit exceeded`,
+the error that PostgreSQL gives for a statement that does not fit its stack.
+A nested scalar subquery adds 6 levels to the parse tree, so 73 nested scalar
+subqueries run and 74 fail. The count can include the bytes of a string
+literal, so a statement close to the limit can fail because of a long
+literal.
+
 The depth of nested queries counts subqueries in a `FROM` clause or in an
 expression, CTE bodies, and parenthesized `FROM` terms. It also counts each
 view or CTE that a query reads through another view or CTE, and each

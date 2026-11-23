@@ -7405,6 +7405,7 @@ dependencies = [
  "miette",
  "pg_query",
  "phf",
+ "prost 0.13.5",
  "thiserror 2.0.16",
  "turso_ast",
 ]
