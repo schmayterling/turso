@@ -51,6 +51,8 @@ A nested scalar subquery adds 6 levels to the parse tree, so 73 nested scalar
 subqueries run and 74 fail. The count can include the bytes of a string
 literal, so a statement close to the limit can fail because of a long
 literal.
+It reports the limit on the depth of nested queries with SQLSTATE 54001
+too.
 
 The depth of nested queries counts subqueries in a `FROM` clause or in an
 expression, CTE bodies, and parenthesized `FROM` terms. It also counts each

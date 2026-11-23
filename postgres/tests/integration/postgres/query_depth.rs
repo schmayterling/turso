@@ -3,6 +3,7 @@
 //! 54001, which PostgreSQL gives for a statement that does not fit its stack.
 
 use crate::common::TempDatabase;
+use turso_core::ast::MAX_QUERY_DEPTH;
 
 /// The stack of the thread that runs each statement, the same as in
 /// `tests/integration/expr_depth_stack_overflow.rs`. The stack frames of a
@@ -39,6 +40,24 @@ fn compound_select_runs() {
     }
 }
 
+#[test]
+fn query_nesting_past_the_engine_limit_is_too_complex() {
+    assert_eq!(first_value(cte_chain(MAX_QUERY_DEPTH)), Ok("1".to_string()));
+    assert_eq!(
+        first_value(cte_chain(MAX_QUERY_DEPTH + 1)),
+        Err("54001: Query is nested too deeply (maximum depth 500)".to_string())
+    );
+}
+
+#[test]
+fn libpg_query_stack_depth_error_is_too_complex() {
+    let sql = format!("SELECT 1{}", "+1".repeat(100_000));
+    assert_eq!(
+        first_value(sql),
+        Err("54001: stack depth limit exceeded".to_string())
+    );
+}
+
 /// `SELECT (SELECT (... (SELECT 1)))` with `depth` nested subqueries.
 fn nested_scalar_subqueries(depth: usize) -> String {
     format!("SELECT {}1{}", "(SELECT ".repeat(depth), ")".repeat(depth))
@@ -48,6 +67,14 @@ fn nested_scalar_subqueries(depth: usize) -> String {
 fn compound_count(terms: usize) -> String {
     let compound = vec!["SELECT 1"; terms].join(" UNION ALL ");
     format!("SELECT count(*) FROM ({compound}) s")
+}
+
+/// A `WITH` clause of `length` CTEs, each of which reads the one before it.
+/// The SQL text is flat, but the plan nests the CTEs `length` deep.
+fn cte_chain(length: usize) -> String {
+    let mut ctes = vec!["n0 AS (SELECT 1 AS a)".to_string()];
+    ctes.extend((1..length).map(|i| format!("n{i} AS (SELECT a FROM n{})", i - 1)));
+    format!("WITH {} SELECT a FROM n{}", ctes.join(", "), length - 1)
 }
 
 /// Runs `sql` in a new database on a thread with [WORKER_STACK] bytes of

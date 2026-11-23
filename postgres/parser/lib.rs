@@ -94,6 +94,12 @@ fn parse_error(error: pg_query::Error) -> ParseError {
                 message: message.clone(),
             }
         }
+        pg_query::Error::Parse(message) if message == "stack depth limit exceeded" => {
+            ParseError::Sqlstate {
+                sqlstate: sqlstate::SQLSTATE_STATEMENT_TOO_COMPLEX,
+                message: message.clone(),
+            }
+        }
         _ => ParseError::ParseError(error.to_string()),
     }
 }

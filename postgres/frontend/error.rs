@@ -437,6 +437,8 @@ fn parse_error_sqlstate(msg: &str) -> &'static str {
         SQLSTATE_INVALID_SCHEMA_NAME
     } else if msg.contains("query_only mode") {
         SQLSTATE_READ_ONLY_SQL_TRANSACTION
+    } else if msg == turso_core::ast::query_nested_too_deeply_message() {
+        SQLSTATE_STATEMENT_TOO_COMPLEX
     } else {
         SQLSTATE_SYNTAX_ERROR
     }
