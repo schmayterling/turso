@@ -184,8 +184,16 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    #[cfg(debug_assertions)]
+    builder.thread_stack_size(turso_pg::DEBUG_THREAD_STACK_SIZE);
+    let runtime = builder.build().expect("build the tokio runtime");
+    runtime.block_on(run())
+}
+
+async fn run() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {

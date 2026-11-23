@@ -40,3 +40,11 @@ pub use turso_core::{
 pub mod vtab {
     pub use turso_core::VirtualTable;
 }
+
+/// The stack of each thread that runs statements in a debug build of the
+/// tursopg server, its CLI and the sqltest runner. The stack frames of a debug
+/// build are many times larger than those of a release build, and statements
+/// well within the depth limits overflow the default stack of a tokio worker
+/// or of the main thread there. A release build keeps the default stacks.
+#[doc(hidden)]
+pub const DEBUG_THREAD_STACK_SIZE: usize = 32 << 20;

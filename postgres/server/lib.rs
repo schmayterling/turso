@@ -79,7 +79,11 @@ impl TursoPgServer {
     }
 
     pub fn run(&self) -> anyhow::Result<()> {
-        let rt = tokio::runtime::Runtime::new()?;
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all();
+        #[cfg(debug_assertions)]
+        builder.thread_stack_size(turso_pg::DEBUG_THREAD_STACK_SIZE);
+        let rt = builder.build()?;
         rt.block_on(self.run_async())
     }
 

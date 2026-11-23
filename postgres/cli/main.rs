@@ -982,6 +982,20 @@ fn is_exit_command(line: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn main() -> anyhow::Result<()> {
+    if cfg!(debug_assertions) {
+        let thread = std::thread::Builder::new()
+            .name("main".to_string())
+            .stack_size(turso_pg::DEBUG_THREAD_STACK_SIZE)
+            .spawn(run)?;
+        return match thread.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+    }
+    run()
+}
+
+fn run() -> anyhow::Result<()> {
     let opts = Opts::parse();
     let _guard = init_tracing(&opts)?;
 
